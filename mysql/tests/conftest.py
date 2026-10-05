@@ -4,6 +4,7 @@
 import copy
 import logging
 import os
+import subprocess
 
 import mock
 import pymysql
@@ -12,6 +13,7 @@ from packaging.version import parse as parse_version
 
 from datadog_checks.dev import TempDir, WaitFor, docker_run
 from datadog_checks.dev.conditions import CheckDockerLogs
+from datadog_checks.dev.docker import ComposeFileDown
 from datadog_checks.mysql.version_utils import parse_version as parse_mysql_version
 
 from . import common, tags
@@ -50,6 +52,11 @@ def config_e2e(instance_basic):
     }
 
 
+@pytest.fixture(autouse=True)
+def _startup_only(dd_environment):  # TEMP (do not merge): a startup failure errors here = flake reproduced
+    pytest.skip('MySQL started fine; skipping tests')
+
+
 @pytest.fixture(scope='session')
 def dd_environment(config_e2e):
     logs_path = _mysql_logs_path()
@@ -65,8 +72,17 @@ def dd_environment(config_e2e):
 
         e2e_metadata = {'docker_volumes': ['{}:{}'.format(logs_host_path, logs_path)]}
 
+        compose_file = os.path.join(common.HERE, 'compose', COMPOSE_FILE)
+
+        def down():  # TEMP (do not merge): dump state before the retry teardown destroys it
+            for args in (['ps', '-a'], ['logs', '--no-color', '--timestamps']):
+                out = subprocess.run(['docker', 'compose', '-f', compose_file, *args], capture_output=True, text=True)
+                with open(os.getenv('GITHUB_STEP_SUMMARY', os.devnull), 'a') as f:
+                    f.write('\n```\n{}\n{}{}\n```\n'.format(args, out.stdout, out.stderr))
+            ComposeFileDown(compose_file)()
+
         with docker_run(
-            os.path.join(common.HERE, 'compose', COMPOSE_FILE),
+            compose_file,
             env_vars={
                 'MYSQL_DOCKER_REPO': _mysql_docker_repo(),
                 'MYSQL_IMAGE_TAG': MYSQL_IMAGE_TAG,
@@ -80,6 +96,7 @@ def dd_environment(config_e2e):
             conditions=_get_warmup_conditions(),
             attempts=2,
             attempts_wait=10,
+            down=down,
         ):
             yield config_e2e, e2e_metadata
 
